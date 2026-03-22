@@ -220,7 +220,8 @@ async def cmd_add_engineer(event: MessageCreated):
         await event.message.answer("⛔ Только руководитель может добавлять инженеров.")
         return
 
-    text = event.message.content.text.replace("/add_engineer", "", 1).strip()
+    # Используем правильный путь к тексту сообщения
+    text = event.message.body.text.replace("/add_engineer", "", 1).strip()
     if not text:
         await event.message.answer("❌ Использование: /add_engineer @username [Имя Фамилия]")
         return
@@ -290,7 +291,7 @@ async def cmd_my_tasks(event: MessageCreated):
 @dp.message_created(Command('done'))
 async def cmd_done(event: MessageCreated):
     user_id = event.message.sender.user_id
-    text = event.message.content.text
+    text = event.message.body.text
     parts = text.split(maxsplit=1)
     if len(parts) < 2 or not parts[1].strip().isdigit():
         await event.message.answer("❌ Использование: /done номер_задачи")
@@ -308,7 +309,7 @@ async def cmd_broadcast(event: MessageCreated):
         await event.message.answer("⛔ У вас нет прав для этой команды.")
         return
 
-    text = event.message.content.text.replace("/broadcast", "", 1).strip()
+    text = event.message.body.text.replace("/broadcast", "", 1).strip()
     if not text:
         await event.message.answer("❌ Использование: /broadcast сообщение для всех")
         return
@@ -338,7 +339,7 @@ async def cmd_assign(event: MessageCreated):
         await event.message.answer("⛔ Только руководитель может создавать задачи.")
         return
 
-    text = event.message.content.text.replace("/assign", "", 1).strip()
+    text = event.message.body.text.replace("/assign", "", 1).strip()
     if not text:
         await event.message.answer("❌ Использование: /assign @username Заголовок | Описание | ДД.ММ.ГГГГ ЧЧ:ММ")
         return
