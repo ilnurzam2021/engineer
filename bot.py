@@ -143,6 +143,20 @@ def get_all_tasks_grouped():
     return rows
 
 # ==================== КОМАНДЫ ====================
+@dp.bot_started()
+async def on_bot_started(event: BotStarted):
+    user = event.user
+
+    register_engineer(
+        user.user_id,
+        getattr(user, 'username', None),
+        f"{getattr(user,'first_name','')} {getattr(user,'last_name','')}".strip()
+    )
+
+    await bot.send_message(
+        chat_id=event.chat_id,
+        text="👋 Бот запущен! Напиши /help"
+    )
 
 @dp.message_created(Command('start'))
 async def start(event: MessageCreated):
