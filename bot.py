@@ -16,7 +16,6 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 import pytz
 
-# Импорты из библиотеки maxapi (без кнопок)
 from maxapi import Bot, Dispatcher
 from maxapi.types import MessageCreated, BotStarted, Command
 
@@ -112,7 +111,6 @@ def get_all_engineers() -> List[Tuple]:
 def remove_engineer_by_user_id(user_id: int) -> bool:
     conn = sqlite3.connect("engineers.db")
     cur = conn.cursor()
-    # Удаляем инженера (задачи удалятся автоматически благодаря ON DELETE CASCADE)
     cur.execute("DELETE FROM engineers WHERE user_id = ?", (user_id,))
     removed = cur.rowcount > 0
     conn.commit()
@@ -177,7 +175,7 @@ def update_reminder_flag(task_id: int, field: str):
     conn.commit()
     conn.close()
 
-# ==================== ОБРАБОТЧИКИ СОБЫТИЙ ====================
+# ==================== ОБРАБОТЧИКИ ====================
 
 @dp.bot_started()
 async def on_bot_started(event: BotStarted):
@@ -192,10 +190,11 @@ async def on_bot_started(event: BotStarted):
         text = (
             "👋 Здравствуйте, руководитель!\n\n"
             "Доступные команды:\n"
-            "/add_engineer @username [Имя] — добавить инженера\n"
+            "/add_engineer_by_id <ID> [Имя] — добавить инженера по ID\n"
             "/remove_engineer @username — удалить инженера\n"
             "/list_engineers — список инженеров\n"
             "/assign @username Заголовок | Описание | ДД.ММ.ГГГГ ЧЧ:ММ\n"
+            "/assign_by_id <ID> Заголовок | Описание | ДД.ММ.ГГГГ ЧЧ:ММ\n"
             "/broadcast текст — сообщение всем инженерам\n"
             "/my_tasks — мои задачи\n"
             "/done N — отметить задачу выполненной\n"
@@ -223,10 +222,11 @@ async def cmd_start(event: MessageCreated):
         text = (
             "👋 Здравствуйте, руководитель!\n\n"
             "Доступные команды:\n"
-            "/add_engineer @username [Имя] — добавить инженера\n"
+            "/add_engineer_by_id <ID> [Имя] — добавить инженера по ID\n"
             "/remove_engineer @username — удалить инженера\n"
             "/list_engineers — список инженеров\n"
             "/assign @username Заголовок | Описание | ДД.ММ.ГГГГ ЧЧ:ММ\n"
+            "/assign_by_id <ID> Заголовок | Описание | ДД.ММ.ГГГГ ЧЧ:ММ\n"
             "/broadcast текст — сообщение всем инженерам\n"
             "/my_tasks — мои задачи\n"
             "/done N — отметить задачу выполненной\n"
@@ -248,10 +248,11 @@ async def cmd_help(event: MessageCreated):
     if user_id == ADMIN_ID:
         text = (
             "📌 *Команды руководителя:*\n"
-            "/add_engineer @username [Имя] — добавить инженера\n"
+            "/add_engineer_by_id <ID> [Имя] — добавить инженера по ID\n"
             "/remove_engineer @username — удалить инженера\n"
             "/list_engineers — список инженеров\n"
             "/assign @username Заголовок | Описание | ДД.ММ.ГГГГ ЧЧ:ММ\n"
+            "/assign_by_id <ID> Заголовок | Описание | ДД.ММ.ГГГГ ЧЧ:ММ\n"
             "/broadcast сообщение — массовая рассылка\n"
             "/my_tasks — мои задачи\n"
             "/done N — отметить задачу выполненной\n\n"
@@ -265,32 +266,36 @@ async def cmd_help(event: MessageCreated):
         )
     await event.message.answer(text, parse_mode="Markdown")
 
-@dp.message_created(Command('add_engineer'))
-async def cmd_add_engineer(event: MessageCreated):
+@dp.message_created(Command('add_engineer_by_id'))
+async def cmd_add_engineer_by_id(event: MessageCreated):
     if event.message.sender.user_id != ADMIN_ID:
         await event.message.answer("⛔ Только руководитель может добавлять инженеров.")
         return
 
-    text = event.message.body.text.replace("/add_engineer", "", 1).strip()
+    text = event.message.body.text.replace("/add_engineer_by_id", "", 1).strip()
     if not text:
-        await event.message.answer("❌ Использование: /add_engineer @username [Имя Фамилия]")
+        await event.message.answer("❌ Использование: /add_engineer_by_id <ID> [Имя Фамилия]")
         return
 
     parts = text.split(maxsplit=1)
-    username = parts[0].lstrip('@')
-    full_name = parts[1] if len(parts) > 1 else username
-
     try:
-        user_info = await bot.resolve_username(username)
-        if not user_info:
-            await event.message.answer(f"❌ Пользователь @{username} не найден в Max.")
-            return
-        user_id = user_info.user_id
-    except Exception as e:
-        await event.message.answer(f"❌ Ошибка при поиске пользователя: {e}")
+        user_id = int(parts[0])
+    except ValueError:
+        await event.message.answer("❌ ID должен быть числом.")
         return
 
-    register_engineer(user_id, username, full_name)
+    full_name = parts[1] if len(parts) > 1 else str(user_id)
+
+    # Проверяем, существует ли пользователь с таким ID в MAX (отправляем сообщение)
+    try:
+        # Отправляем тестовое сообщение, чтобы проверить, что пользователь существует
+        await bot.send_message(chat_id=user_id, text="🔍 Проверка связи...")
+        # Если дошли, то пользователь существует
+    except Exception as e:
+        await event.message.answer(f"❌ Не удалось отправить сообщение пользователю с ID {user_id}. Убедитесь, что он существует и не заблокировал бота.")
+        return
+
+    register_engineer(user_id, username=None, full_name=full_name)
 
     try:
         await bot.send_message(
@@ -301,7 +306,7 @@ async def cmd_add_engineer(event: MessageCreated):
     except Exception as e:
         logger.warning(f"Не удалось отправить приветствие {user_id}: {e}")
 
-    await event.message.answer(f"✅ Инженер @{username} ({full_name}) добавлен. Уведомление отправлено.")
+    await event.message.answer(f"✅ Инженер с ID {user_id} ({full_name}) добавлен. Уведомление отправлено.")
 
 @dp.message_created(Command('remove_engineer'))
 async def cmd_remove_engineer(event: MessageCreated):
@@ -431,7 +436,7 @@ async def cmd_assign(event: MessageCreated):
 
     engineer = get_engineer_by_username(username_raw)
     if not engineer:
-        await event.message.answer(f"❌ Инженер с username '{username_raw}' не найден. Сначала добавьте его через /add_engineer.")
+        await event.message.answer(f"❌ Инженер с username '{username_raw}' не найден. Сначала добавьте его через /add_engineer_by_id или попросите написать /start.")
         return
 
     assigned_to, username, full_name = engineer
@@ -453,6 +458,76 @@ async def cmd_assign(event: MessageCreated):
     await event.message.answer(
         f"✅ Задача #{task_id} создана!\n"
         f"👷 Инженер: @{username}\n"
+        f"📌 {title}\n"
+        f"📝 {description or '—'}\n"
+        f"⏰ Срок: {due_fmt}"
+    )
+
+    try:
+        await bot.send_message(
+            chat_id=assigned_to,
+            text=f"🔔 Новая задача #{task_id}!\n\n"
+                 f"*{title}*\n{description}\n\n"
+                 f"⏰ Срок: {due_fmt}\n\n"
+                 f"/my_tasks — список ваших задач."
+        )
+    except Exception as e:
+        logger.error(f"Ошибка уведомления: {e}")
+
+@dp.message_created(Command('assign_by_id'))
+async def cmd_assign_by_id(event: MessageCreated):
+    if event.message.sender.user_id != ADMIN_ID:
+        await event.message.answer("⛔ Только руководитель может создавать задачи.")
+        return
+
+    text = event.message.body.text.replace("/assign_by_id", "", 1).strip()
+    if not text:
+        await event.message.answer("❌ Использование: /assign_by_id <ID> Заголовок | Описание | ДД.ММ.ГГГГ ЧЧ:ММ")
+        return
+
+    parts = text.split(maxsplit=1)
+    if len(parts) < 2:
+        await event.message.answer("❌ Укажите ID инженера и параметры задачи.")
+        return
+
+    try:
+        assigned_to = int(parts[0])
+    except ValueError:
+        await event.message.answer("❌ ID должен быть числом.")
+        return
+
+    rest = parts[1]
+    task_parts = [p.strip() for p in rest.split("|")]
+    if len(task_parts) < 3:
+        await event.message.answer("❌ Формат: /assign_by_id ID Заголовок | Описание | ДД.ММ.ГГГГ ЧЧ:ММ")
+        return
+
+    title, description, due_str = task_parts[0], task_parts[1], task_parts[2]
+
+    engineer = get_engineer_by_user_id(assigned_to)
+    if not engineer:
+        await event.message.answer(f"❌ Инженер с ID {assigned_to} не найден. Сначала добавьте его через /add_engineer_by_id или попросите написать /start.")
+        return
+
+    username, full_name = engineer[1], engineer[2]
+
+    try:
+        due_date = datetime.strptime(due_str, "%d.%m.%Y %H:%M")
+        due_date = TIMEZONE.localize(due_date)
+    except ValueError:
+        await event.message.answer("❌ Неверный формат даты. Используйте: ДД.ММ.ГГГГ ЧЧ:ММ")
+        return
+
+    if due_date < datetime.now(TIMEZONE):
+        await event.message.answer("⚠️ Срок выполнения уже прошёл.")
+        return
+
+    task_id = add_task(title, description, assigned_to, due_date, event.message.sender.user_id)
+    due_fmt = due_date.strftime("%d.%m.%Y %H:%M")
+
+    await event.message.answer(
+        f"✅ Задача #{task_id} создана!\n"
+        f"👷 Инженер: {full_name} (ID: {assigned_to})\n"
         f"📌 {title}\n"
         f"📝 {description or '—'}\n"
         f"⏰ Срок: {due_fmt}"
