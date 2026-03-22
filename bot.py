@@ -192,6 +192,7 @@ async def on_bot_started(event: BotStarted):
             "Доступные команды:\n"
             "/add_engineer_by_id <ID> [Имя] — добавить инженера по ID\n"
             "/remove_engineer @username — удалить инженера\n"
+            "/remove_engineer_by_id <ID> — удалить инженера по ID\n"
             "/list_engineers — список инженеров\n"
             "/assign @username Заголовок | Описание | ДД.ММ.ГГГГ ЧЧ:ММ\n"
             "/assign_by_id <ID> Заголовок | Описание | ДД.ММ.ГГГГ ЧЧ:ММ\n"
@@ -224,6 +225,7 @@ async def cmd_start(event: MessageCreated):
             "Доступные команды:\n"
             "/add_engineer_by_id <ID> [Имя] — добавить инженера по ID\n"
             "/remove_engineer @username — удалить инженера\n"
+            "/remove_engineer_by_id <ID> — удалить инженера по ID\n"
             "/list_engineers — список инженеров\n"
             "/assign @username Заголовок | Описание | ДД.ММ.ГГГГ ЧЧ:ММ\n"
             "/assign_by_id <ID> Заголовок | Описание | ДД.ММ.ГГГГ ЧЧ:ММ\n"
@@ -247,24 +249,25 @@ async def cmd_help(event: MessageCreated):
     user_id = event.message.sender.user_id
     if user_id == ADMIN_ID:
         text = (
-            "📌 *Команды руководителя:*\n"
+            "📌 Команды руководителя:\n"
             "/add_engineer_by_id <ID> [Имя] — добавить инженера по ID\n"
             "/remove_engineer @username — удалить инженера\n"
+            "/remove_engineer_by_id <ID> — удалить инженера по ID\n"
             "/list_engineers — список инженеров\n"
             "/assign @username Заголовок | Описание | ДД.ММ.ГГГГ ЧЧ:ММ\n"
             "/assign_by_id <ID> Заголовок | Описание | ДД.ММ.ГГГГ ЧЧ:ММ\n"
             "/broadcast сообщение — массовая рассылка\n"
             "/my_tasks — мои задачи\n"
             "/done N — отметить задачу выполненной\n\n"
-            "📅 *Формат даты:* ДД.ММ.ГГГГ ЧЧ:ММ (например, 31.12.2025 18:00)"
+            "📅 Формат даты: ДД.ММ.ГГГГ ЧЧ:ММ (например, 31.12.2025 18:00)"
         )
     else:
         text = (
-            "📌 *Команды инженера:*\n"
+            "📌 Команды инженера:\n"
             "/my_tasks — список моих задач\n"
             "/done N — отметить задачу выполненной"
         )
-    await event.message.answer(text, parse_mode="Markdown")
+    await event.message.answer(text)
 
 @dp.message_created(Command('add_engineer_by_id'))
 async def cmd_add_engineer_by_id(event: MessageCreated):
@@ -286,11 +289,9 @@ async def cmd_add_engineer_by_id(event: MessageCreated):
 
     full_name = parts[1] if len(parts) > 1 else str(user_id)
 
-    # Проверяем, существует ли пользователь с таким ID в MAX (отправляем сообщение)
+    # Проверяем, существует ли пользователь (отправляем тестовое сообщение)
     try:
-        # Отправляем тестовое сообщение, чтобы проверить, что пользователь существует
         await bot.send_message(chat_id=user_id, text="🔍 Проверка связи...")
-        # Если дошли, то пользователь существует
     except Exception as e:
         await event.message.answer(f"❌ Не удалось отправить сообщение пользователю с ID {user_id}. Убедитесь, что он существует и не заблокировал бота.")
         return
@@ -331,6 +332,34 @@ async def cmd_remove_engineer(event: MessageCreated):
     else:
         await event.message.answer("❌ Не удалось удалить инженера.")
 
+@dp.message_created(Command('remove_engineer_by_id'))
+async def cmd_remove_engineer_by_id(event: MessageCreated):
+    if event.message.sender.user_id != ADMIN_ID:
+        await event.message.answer("⛔ Только руководитель может удалять инженеров.")
+        return
+
+    text = event.message.body.text.replace("/remove_engineer_by_id", "", 1).strip()
+    if not text:
+        await event.message.answer("❌ Использование: /remove_engineer_by_id <ID>")
+        return
+
+    try:
+        user_id = int(text.strip())
+    except ValueError:
+        await event.message.answer("❌ ID должен быть числом.")
+        return
+
+    engineer = get_engineer_by_user_id(user_id)
+    if not engineer:
+        await event.message.answer(f"❌ Инженер с ID {user_id} не найден.")
+        return
+
+    _, username, full_name = engineer
+    if remove_engineer_by_user_id(user_id):
+        await event.message.answer(f"✅ Инженер {full_name} (ID: {user_id}) удалён. Все его задачи также удалены.")
+    else:
+        await event.message.answer("❌ Не удалось удалить инженера.")
+
 @dp.message_created(Command('list_engineers'))
 async def cmd_list_engineers(event: MessageCreated):
     if event.message.sender.user_id != ADMIN_ID:
@@ -342,7 +371,7 @@ async def cmd_list_engineers(event: MessageCreated):
         await event.message.answer("Нет зарегистрированных инженеров.")
         return
 
-    answer = "📋 *Список инженеров:*\n\n"
+    answer = "📋 Список инженеров:\n\n"
     for user_id, username, full_name in engineers:
         answer += f"• {full_name} (@{username or 'нет username'}) — ID: {user_id}\n"
     await event.message.answer(answer)
@@ -356,12 +385,12 @@ async def cmd_my_tasks(event: MessageCreated):
         await event.message.answer("✅ У вас нет активных задач.")
         return
 
-    answer = "📋 *Ваши активные задачи:*\n\n"
+    answer = "📋 Ваши активные задачи:\n\n"
     for task_id, title, desc, due_date_str, status in tasks:
         due_date = datetime.fromisoformat(due_date_str)
         due_fmt = due_date.strftime("%d.%m.%Y %H:%M")
-        answer += f"*{task_id}.* {title}\n   📝 {desc}\n   ⏰ Срок: {due_fmt}\n\n"
-    await event.message.answer(answer, parse_mode="Markdown")
+        answer += f"{task_id}. {title}\n   📝 {desc}\n   ⏰ Срок: {due_fmt}\n\n"
+    await event.message.answer(answer)
 
 @dp.message_created(Command('done'))
 async def cmd_done(event: MessageCreated):
@@ -399,7 +428,7 @@ async def cmd_broadcast(event: MessageCreated):
         try:
             await bot.send_message(
                 chat_id=user_id,
-                text=f"📢 *Массовое уведомление:*\n\n{text}"
+                text=f"📢 Массовое уведомление:\n\n{text}"
             )
             success += 1
             await asyncio.sleep(0.05)
@@ -467,7 +496,7 @@ async def cmd_assign(event: MessageCreated):
         await bot.send_message(
             chat_id=assigned_to,
             text=f"🔔 Новая задача #{task_id}!\n\n"
-                 f"*{title}*\n{description}\n\n"
+                 f"{title}\n{description}\n\n"
                  f"⏰ Срок: {due_fmt}\n\n"
                  f"/my_tasks — список ваших задач."
         )
@@ -537,7 +566,7 @@ async def cmd_assign_by_id(event: MessageCreated):
         await bot.send_message(
             chat_id=assigned_to,
             text=f"🔔 Новая задача #{task_id}!\n\n"
-                 f"*{title}*\n{description}\n\n"
+                 f"{title}\n{description}\n\n"
                  f"⏰ Срок: {due_fmt}\n\n"
                  f"/my_tasks — список ваших задач."
         )
@@ -568,8 +597,8 @@ async def check_reminders():
         if not rem_24h and delta <= timedelta(hours=24):
             await bot.send_message(
                 chat_id=assigned_to,
-                text=f"⏰ *Напоминание о задаче #{task_id}*\n\n"
-                     f"*{title}*\n{desc or ''}\n\n"
+                text=f"⏰ Напоминание о задаче #{task_id}\n\n"
+                     f"{title}\n{desc or ''}\n\n"
                      f"⏳ Осталось менее 24 часов. Срок: {due_date.strftime('%d.%m.%Y %H:%M')}"
             )
             update_reminder_flag(task_id, "reminder_24h_sent")
@@ -577,7 +606,7 @@ async def check_reminders():
         elif not rem_1h and delta <= timedelta(hours=1):
             await bot.send_message(
                 chat_id=assigned_to,
-                text=f"⚠️ *Срочное напоминание!*\n\n"
+                text=f"⚠️ Срочное напоминание!\n\n"
                      f"Задача #{task_id} «{title}»\n"
                      f"Срок выполнения через час: {due_date.strftime('%d.%m.%Y %H:%M')}"
             )
@@ -586,7 +615,7 @@ async def check_reminders():
         elif not rem_5min and delta <= timedelta(minutes=5):
             await bot.send_message(
                 chat_id=assigned_to,
-                text=f"🚨 *Задача #{task_id} должна быть выполнена через 5 минут!*\n\n"
+                text=f"🚨 Задача #{task_id} должна быть выполнена через 5 минут!\n\n"
                      f"«{title}» — {desc or ''}\n"
                      f"Срок: {due_date.strftime('%d.%m.%Y %H:%M')}"
             )
