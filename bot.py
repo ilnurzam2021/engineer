@@ -38,9 +38,9 @@ scheduler = AsyncIOScheduler(timezone=TIMEZONE)
 
 # ==================== БД ====================
 def get_conn():
-    conn = sqlite3.connect("engineers.db")
-    conn.execute("PRAGMA foreign_keys = ON")
-    return conn
+    DB_PATH = "/app/data/engineers.db"  # или используйте переменную окружения
+    conn = sqlite3.connect(DB_PATH)
+    ...
 
 def init_db():
     conn = get_conn()
