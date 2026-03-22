@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
 Бот для управления задачами инженеров в мессенджере MAX.
-Руководитель может добавлять инженеров по username и назначать задачи.
-С кнопками-меню.
+Руководитель может добавлять/удалять инженеров, назначать задачи.
 """
 
 import os
@@ -17,12 +16,9 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 import pytz
 
-# Импорты из библиотеки maxapi
 from maxapi import Bot, Dispatcher
 from maxapi.types import MessageCreated, BotStarted, Command
-from maxapi.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-# ==================== КОНФИГУРАЦИЯ ====================
 load_dotenv()
 BOT_TOKEN = os.getenv("MAX_BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
@@ -40,24 +36,6 @@ logger = logging.getLogger(__name__)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 scheduler = AsyncIOScheduler(timezone=TIMEZONE)
-
-# ==================== КЛАВИАТУРА ====================
-def get_main_keyboard():
-    """Возвращает инлайн-клавиатуру с основными командами"""
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="📋 Мои задачи", callback_data="my_tasks"),
-            InlineKeyboardButton(text="✅ Выполнить задачу", callback_data="done")
-        ],
-        [
-            InlineKeyboardButton(text="➕ Добавить инженера", callback_data="add_engineer"),
-            InlineKeyboardButton(text="📝 Назначить задачу", callback_data="assign")
-        ],
-        [
-            InlineKeyboardButton(text="📢 Массовая рассылка", callback_data="broadcast"),
-            InlineKeyboardButton(text="👥 Список инженеров", callback_data="list_engineers")
-        ]
-    ])
 
 # ==================== БАЗА ДАННЫХ ====================
 def init_db():
@@ -103,6 +81,19 @@ def register_engineer(user_id: int, username: str = None, full_name: str = None)
     """, (user_id, username, full_name))
     conn.commit()
     conn.close()
+
+def remove_engineer(user_id: int) -> bool:
+    """Удаляет инженера из базы и его активные задачи"""
+    conn = sqlite3.connect("engineers.db")
+    cur = conn.cursor()
+    # Удаляем задачи инженера
+    cur.execute("DELETE FROM tasks WHERE assigned_to = ?", (user_id,))
+    # Удаляем инженера
+    cur.execute("DELETE FROM engineers WHERE user_id = ?", (user_id,))
+    deleted = cur.rowcount > 0
+    conn.commit()
+    conn.close()
+    return deleted
 
 def get_engineer_by_user_id(user_id: int) -> Optional[Tuple]:
     conn = sqlite3.connect("engineers.db")
@@ -178,7 +169,7 @@ def update_reminder_flag(task_id: int, field: str):
     conn.commit()
     conn.close()
 
-# ==================== ОБРАБОТЧИКИ СОБЫТИЙ ====================
+# ==================== ОБРАБОТЧИКИ ====================
 
 @dp.bot_started()
 async def on_bot_started(event: BotStarted):
@@ -189,56 +180,54 @@ async def on_bot_started(event: BotStarted):
     full_name = full_name.strip()
     register_engineer(user_id, username, full_name)
 
-    text = (
-        "👋 Здравствуйте! Вы зарегистрированы в системе задач.\n\n"
-        "Используйте кнопки ниже для управления."
-    )
-    await bot.send_message(
-        chat_id=event.chat_id,
-        text=text,
-        reply_markup=get_main_keyboard()
-    )
-
-@dp.message_created(Command('start'))
-async def cmd_start(event: MessageCreated):
-    # Аналогично bot_started, но для ручного вызова
-    user_id = event.message.sender.user_id
-    username = getattr(event.message.sender, 'username', None)
-    full_name = getattr(event.message.sender, 'first_name', '') + ' ' + getattr(event.message.sender, 'last_name', '')
-    full_name = full_name.strip()
-    register_engineer(user_id, username, full_name)
-
-    text = (
-        "👋 Здравствуйте! Вы зарегистрированы в системе задач.\n\n"
-        "Используйте кнопки ниже для управления."
-    )
-    await bot.send_message(
-        chat_id=event.chat_id,
-        text=text,
-        reply_markup=get_main_keyboard()
-    )
+    if user_id == ADMIN_ID:
+        text = (
+            "👋 Здравствуйте, руководитель!\n\n"
+            "Доступные команды:\n"
+            "/add_engineer @username [Имя] — добавить инженера\n"
+            "/remove_engineer @username — удалить инженера\n"
+            "/list_engineers — список инженеров\n"
+            "/assign @username Заголовок | Описание | ДД.ММ.ГГГГ ЧЧ:ММ\n"
+            "/broadcast текст — сообщение всем\n"
+            "/my_tasks — мои задачи\n"
+            "/done N — отметить задачу выполненной\n"
+            "/help — справка"
+        )
+    else:
+        text = (
+            "👋 Привет! Вы зарегистрированы в системе задач.\n\n"
+            "Доступные команды:\n"
+            "/my_tasks — мои задачи\n"
+            "/done N — отметить задачу выполненной\n"
+            "/help — справка"
+        )
+    await bot.send_message(chat_id=event.chat_id, text=text)
 
 @dp.message_created(Command('help'))
 async def cmd_help(event: MessageCreated):
-    text = (
-        "📌 *Доступные команды:*\n"
-        "Используйте кнопки под полем ввода.\n"
-        "Также доступны текстовые команды:\n"
-        "/start – приветствие и меню\n"
-        "/add_engineer @username [Имя] – добавить инженера\n"
-        "/list_engineers – список инженеров\n"
-        "/assign @username Заголовок | Описание | ДД.ММ.ГГГГ ЧЧ:ММ\n"
-        "/broadcast текст – сообщение всем\n"
-        "/my_tasks – мои задачи\n"
-        "/done N – отметить задачу выполненной\n"
-        "/help – эта справка\n\n"
-        "📅 *Формат даты:* ДД.ММ.ГГГГ ЧЧ:ММ (например, 31.12.2025 18:00)"
-    )
+    user_id = event.message.sender.user_id
+    if user_id == ADMIN_ID:
+        text = (
+            "📌 *Команды руководителя:*\n"
+            "/add_engineer @username [Имя] — добавить инженера\n"
+            "/remove_engineer @username — удалить инженера (и его задачи)\n"
+            "/list_engineers — список инженеров\n"
+            "/assign @username Заголовок | Описание | ДД.ММ.ГГГГ ЧЧ:ММ\n"
+            "/broadcast сообщение — массовая рассылка\n"
+            "/my_tasks — мои задачи\n"
+            "/done N — отметить задачу выполненной\n\n"
+            "📅 *Формат даты:* ДД.ММ.ГГГГ ЧЧ:ММ (например, 31.12.2025 18:00)"
+        )
+    else:
+        text = (
+            "📌 *Команды инженера:*\n"
+            "/my_tasks — список моих задач\n"
+            "/done N — отметить задачу выполненной"
+        )
     await event.message.answer(text, parse_mode="Markdown")
 
 @dp.message_created(Command('add_engineer'))
 async def cmd_add_engineer(event: MessageCreated):
-    """Добавить инженера по username (только для руководителя)"""
     if event.message.sender.user_id != ADMIN_ID:
         await event.message.answer("⛔ Только руководитель может добавлять инженеров.")
         return
@@ -275,6 +264,37 @@ async def cmd_add_engineer(event: MessageCreated):
 
     await event.message.answer(f"✅ Инженер @{username} ({full_name}) добавлен. Уведомление отправлено.")
 
+@dp.message_created(Command('remove_engineer'))
+async def cmd_remove_engineer(event: MessageCreated):
+    if event.message.sender.user_id != ADMIN_ID:
+        await event.message.answer("⛔ Только руководитель может удалять инженеров.")
+        return
+
+    text = event.message.body.text.replace("/remove_engineer", "", 1).strip()
+    if not text:
+        await event.message.answer("❌ Использование: /remove_engineer @username")
+        return
+
+    username = text.lstrip('@')
+    # Находим инженера по username
+    conn = sqlite3.connect("engineers.db")
+    cur = conn.cursor()
+    cur.execute("SELECT user_id, username, full_name FROM engineers WHERE username LIKE ?", (f"%{username}%",))
+    engineer = cur.fetchone()
+    conn.close()
+
+    if not engineer:
+        await event.message.answer(f"❌ Инженер с username '{username}' не найден.")
+        return
+
+    user_id, username_db, full_name = engineer
+
+    # Удаляем
+    if remove_engineer(user_id):
+        await event.message.answer(f"✅ Инженер {full_name} (@{username_db}) удалён. Его задачи также удалены.")
+    else:
+        await event.message.answer(f"❌ Не удалось удалить инженера.")
+
 @dp.message_created(Command('list_engineers'))
 async def cmd_list_engineers(event: MessageCreated):
     if event.message.sender.user_id != ADMIN_ID:
@@ -289,7 +309,7 @@ async def cmd_list_engineers(event: MessageCreated):
     answer = "📋 *Список инженеров:*\n\n"
     for user_id, username, full_name in engineers:
         answer += f"• {full_name} (@{username or 'нет username'}) — ID: {user_id}\n"
-    await event.message.answer(answer)
+    await event.message.answer(answer, parse_mode="Markdown")
 
 @dp.message_created(Command('my_tasks'))
 async def cmd_my_tasks(event: MessageCreated):
@@ -305,7 +325,7 @@ async def cmd_my_tasks(event: MessageCreated):
         due_date = datetime.fromisoformat(due_date_str)
         due_fmt = due_date.strftime("%d.%m.%Y %H:%M")
         answer += f"*{task_id}.* {title}\n   📝 {desc}\n   ⏰ Срок: {due_fmt}\n\n"
-    await event.message.answer(answer)
+    await event.message.answer(answer, parse_mode="Markdown")
 
 @dp.message_created(Command('done'))
 async def cmd_done(event: MessageCreated):
@@ -423,64 +443,7 @@ async def cmd_assign(event: MessageCreated):
     except Exception as e:
         logger.error(f"Ошибка уведомления: {e}")
 
-# ==================== ОБРАБОТКА НАЖАТИЙ КНОПОК ====================
-
-@dp.callback_query_handler()
-async def handle_callback(event):
-    user_id = event.user.user_id
-    callback_data = event.callback_data
-
-    # Подтверждаем получение (чтобы убрать "часики")
-    await bot.answer_callback_query(event.callback_query_id)
-
-    if callback_data == "my_tasks":
-        tasks = get_user_tasks(user_id)
-        if not tasks:
-            await bot.send_message(chat_id=user_id, text="✅ У вас нет активных задач.")
-        else:
-            answer = "📋 *Ваши активные задачи:*\n\n"
-            for task_id, title, desc, due_date_str, status in tasks:
-                due_date = datetime.fromisoformat(due_date_str)
-                due_fmt = due_date.strftime("%d.%m.%Y %H:%M")
-                answer += f"*{task_id}.* {title}\n   📝 {desc}\n   ⏰ Срок: {due_fmt}\n\n"
-            await bot.send_message(chat_id=user_id, text=answer)
-
-    elif callback_data == "done":
-        await bot.send_message(chat_id=user_id, text="Введите номер задачи для выполнения: /done <номер>")
-
-    elif callback_data == "add_engineer":
-        if user_id != ADMIN_ID:
-            await bot.send_message(chat_id=user_id, text="⛔ Только руководитель может добавлять инженеров.")
-        else:
-            await bot.send_message(chat_id=user_id, text="Введите команду: /add_engineer @username Имя Фамилия")
-
-    elif callback_data == "assign":
-        if user_id != ADMIN_ID:
-            await bot.send_message(chat_id=user_id, text="⛔ Только руководитель может назначать задачи.")
-        else:
-            await bot.send_message(chat_id=user_id, text="Введите команду: /assign @username Заголовок | Описание | ДД.ММ.ГГГГ ЧЧ:ММ")
-
-    elif callback_data == "broadcast":
-        if user_id != ADMIN_ID:
-            await bot.send_message(chat_id=user_id, text="⛔ Только руководитель может делать рассылку.")
-        else:
-            await bot.send_message(chat_id=user_id, text="Введите текст для массовой рассылки: /broadcast сообщение")
-
-    elif callback_data == "list_engineers":
-        if user_id != ADMIN_ID:
-            await bot.send_message(chat_id=user_id, text="⛔ Только руководитель.")
-        else:
-            engineers = get_all_engineers()
-            if not engineers:
-                await bot.send_message(chat_id=user_id, text="Нет зарегистрированных инженеров.")
-            else:
-                answer = "📋 *Список инженеров:*\n\n"
-                for uid, username, full_name in engineers:
-                    answer += f"• {full_name} (@{username or 'нет username'}) — ID: {uid}\n"
-                await bot.send_message(chat_id=user_id, text=answer)
-
 # ==================== ФОНОВЫЕ НАПОМИНАНИЯ ====================
-
 async def check_reminders():
     tasks = get_all_active_tasks()
     now = datetime.now(TIMEZONE)
@@ -528,7 +491,6 @@ async def check_reminders():
             update_reminder_flag(task_id, "reminder_5min_sent")
 
 # ==================== ЗАПУСК ====================
-
 async def main():
     init_db()
     try:
