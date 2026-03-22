@@ -172,6 +172,7 @@ async def help_cmd(event: MessageCreated):
         await event.message.answer(
             "/assign ID Заголовок | Описание | ДД.ММ.ГГГГ ЧЧ:ММ\n"
             "/all_tasks — все задачи\n"
+            "/list_tasks — список всех активных задач (кратко)\n"
             "/broadcast текст\n"
             "/my_tasks\n"
             "/done N"
@@ -187,42 +188,91 @@ async def assign(event: MessageCreated):
     text = event.message.body.text.replace("/assign", "").strip()
     parts = text.split(maxsplit=1)
 
-    user_id = int(parts[0])
-    title, desc, due = [x.strip() for x in parts[1].split("|")]
+    try:
+        user_id = int(parts[0])
+    except ValueError:
+        await event.message.answer("❌ ID должен быть числом.")
+        return
 
-    due_date = TIMEZONE.localize(datetime.strptime(due, "%d.%m.%Y %H:%M"))
+    if len(parts) < 2:
+        await event.message.answer("❌ Укажите параметры: Заголовок | Описание | ДД.ММ.ГГГГ ЧЧ:ММ")
+        return
 
-    task_id = add_task(title, desc, user_id, due_date)
+    task_data = parts[1].split("|")
+    if len(task_data) < 3:
+        await event.message.answer("❌ Неверный формат. Используйте: Заголовок | Описание | ДД.ММ.ГГГГ ЧЧ:ММ")
+        return
 
-    await bot.send_message(user_id, f"Новая задача #{task_id}: {title}")
+    title = task_data[0].strip()
+    description = task_data[1].strip()
+    due_str = task_data[2].strip()
 
-    await event.message.answer(f"Создана задача #{task_id}")
+    try:
+        due_date = datetime.strptime(due_str, "%d.%m.%Y %H:%M")
+        due_date = TIMEZONE.localize(due_date)
+    except ValueError:
+        await event.message.answer("❌ Неверный формат даты. Используйте: ДД.ММ.ГГГГ ЧЧ:ММ")
+        return
+
+    if due_date < datetime.now(TIMEZONE):
+        await event.message.answer("⚠️ Срок выполнения уже прошёл.")
+        return
+
+    # Проверяем, существует ли инженер в БД
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT user_id, full_name FROM engineers WHERE user_id=?", (user_id,))
+    engineer = cur.fetchone()
+    conn.close()
+
+    if not engineer:
+        await event.message.answer(f"❌ Инженер с ID {user_id} не зарегистрирован. Попросите его написать /start.")
+        return
+
+    task_id = add_task(title, description, user_id, due_date)
+
+    await event.message.answer(f"✅ Задача #{task_id} создана для инженера {engineer[1]} (ID: {user_id})")
+
+    # Отправляем уведомление инженеру
+    try:
+        await bot.send_message(user_id, f"🔔 Новая задача #{task_id}:\n{title}\n{description}\nСрок: {due_date.strftime('%d.%m.%Y %H:%M')}")
+    except Exception as e:
+        logger.error(f"Не удалось отправить уведомление {user_id}: {e}")
 
 @dp.message_created(Command('my_tasks'))
 async def my_tasks(event: MessageCreated):
-    tasks = get_user_tasks(event.message.sender.user_id)
+    user_id = event.message.sender.user_id
+    tasks = get_user_tasks(user_id)
 
     if not tasks:
-        await event.message.answer("Нет задач")
+        await event.message.answer("✅ У вас нет активных задач.")
         return
 
-    text = ""
+    answer = "📋 Ваши активные задачи:\n\n"
     for t in tasks:
-        due = datetime.fromisoformat(t[3])
-        if due.tzinfo is None:
-            due = TIMEZONE.localize(due)
+        task_id, title, desc, due_str = t
+        due_date = datetime.fromisoformat(due_str)
+        if due_date.tzinfo is None:
+            due_date = TIMEZONE.localize(due_date)
+        due_fmt = due_date.strftime("%d.%m.%Y %H:%M")
+        answer += f"{task_id}. {title}\n   📝 {desc}\n   ⏰ Срок: {due_fmt}\n\n"
 
-        text += f"{t[0]}. {t[1]} до {due.strftime('%d.%m %H:%M')}\n"
-
-    await event.message.answer(text)
+    await event.message.answer(answer)
 
 @dp.message_created(Command('done'))
 async def done(event: MessageCreated):
-    task_id = int(event.message.body.text.split()[1])
-    if complete_task(task_id, event.message.sender.user_id):
-        await event.message.answer("Готово")
+    user_id = event.message.sender.user_id
+    text = event.message.body.text
+    parts = text.split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip().isdigit():
+        await event.message.answer("❌ Использование: /done номер_задачи")
+        return
+
+    task_id = int(parts[1].strip())
+    if complete_task(task_id, user_id):
+        await event.message.answer(f"✅ Задача #{task_id} выполнена!")
     else:
-        await event.message.answer("Ошибка")
+        await event.message.answer(f"❌ Задача #{task_id} не найдена или уже выполнена.")
 
 @dp.message_created(Command('all_tasks'))
 async def all_tasks(event: MessageCreated):
@@ -231,6 +281,10 @@ async def all_tasks(event: MessageCreated):
 
     tasks = get_all_tasks_grouped()
     now = datetime.now(TIMEZONE)
+
+    if not tasks:
+        await event.message.answer("Нет задач.")
+        return
 
     text = "Все задачи:\n\n"
     current = None
@@ -252,56 +306,122 @@ async def all_tasks(event: MessageCreated):
 
     await event.message.answer(text)
 
+@dp.message_created(Command('list_tasks'))
+async def list_tasks(event: MessageCreated):
+    if event.message.sender.user_id != ADMIN_ID:
+        return
+
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT t.id, t.title, t.description, t.due_date, t.status,
+               e.full_name, e.username, t.assigned_to
+        FROM tasks t
+        JOIN engineers e ON t.assigned_to = e.user_id
+        WHERE t.status='active'
+        ORDER BY t.due_date
+    """)
+    tasks = cur.fetchall()
+    conn.close()
+
+    if not tasks:
+        await event.message.answer("Нет активных задач.")
+        return
+
+    answer = "📋 Активные задачи:\n\n"
+    for task in tasks:
+        task_id, title, desc, due_str, status, full_name, username, uid = task
+        due = datetime.fromisoformat(due_str)
+        if due.tzinfo is None:
+            due = TIMEZONE.localize(due)
+        due_fmt = due.strftime("%d.%m.%Y %H:%M")
+        answer += f"#{task_id}: {title}\n   👷 {full_name} (ID: {uid})\n   ⏰ {due_fmt}\n   📝 {desc or '—'}\n\n"
+
+    await event.message.answer(answer)
+
 @dp.message_created(Command('broadcast'))
 async def broadcast(event: MessageCreated):
     if event.message.sender.user_id != ADMIN_ID:
         return
 
     msg = event.message.body.text.replace("/broadcast", "").strip()
+    if not msg:
+        await event.message.answer("❌ Использование: /broadcast текст")
+        return
+
     users = get_all_engineers()
 
+    success = 0
     for u in users:
         try:
-            await bot.send_message(u[0], msg)
+            await bot.send_message(u[0], f"📢 Сообщение от руководителя:\n\n{msg}")
+            success += 1
             await asyncio.sleep(0.05)
-        except:
-            pass
+        except Exception as e:
+            logger.error(f"Не удалось отправить сообщение {u[0]}: {e}")
 
-    await event.message.answer("Рассылка завершена")
+    await event.message.answer(f"✅ Рассылка завершена. Отправлено {success} из {len(users)} инженерам.")
 
 # ==================== НАПОМИНАНИЯ ====================
-
 async def check_reminders():
     conn = get_conn()
     cur = conn.cursor()
 
-    cur.execute("SELECT id, title, due_date, assigned_to FROM tasks WHERE status='active'")
+    cur.execute("SELECT id, title, due_date, assigned_to, reminder_24h_sent, reminder_1h_sent, reminder_5min_sent FROM tasks WHERE status='active'")
     tasks = cur.fetchall()
+    conn.close()
 
     now = datetime.now(TIMEZONE)
 
     for t in tasks:
-        task_id, title, due_str, user_id = t
+        task_id, title, due_str, user_id, rem_24, rem_1, rem_5 = t
         due = datetime.fromisoformat(due_str)
-
         if due.tzinfo is None:
             due = TIMEZONE.localize(due)
 
-        if due < now:
-            cur.execute("UPDATE tasks SET status='expired' WHERE id=?", (task_id,))
-            await bot.send_message(user_id, f"Задача {title} просрочена")
+        delta = due - now
 
-    conn.commit()
-    conn.close()
+        if due < now:
+            conn = get_conn()
+            cur = conn.cursor()
+            cur.execute("UPDATE tasks SET status='expired' WHERE id=?", (task_id,))
+            conn.commit()
+            conn.close()
+            await bot.send_message(user_id, f"⚠️ Задача #{task_id} «{title}» просрочена.")
+            continue
+
+        if not rem_24 and delta <= timedelta(hours=24):
+            await bot.send_message(user_id, f"⏰ Напоминание о задаче #{task_id} «{title}». Осталось менее 24 часов. Срок: {due.strftime('%d.%m.%Y %H:%M')}")
+            conn = get_conn()
+            cur = conn.cursor()
+            cur.execute("UPDATE tasks SET reminder_24h_sent=1 WHERE id=?", (task_id,))
+            conn.commit()
+            conn.close()
+
+        elif not rem_1 and delta <= timedelta(hours=1):
+            await bot.send_message(user_id, f"⚠️ Срочное напоминание! Задача #{task_id} «{title}» должна быть выполнена через час. Срок: {due.strftime('%d.%m.%Y %H:%M')}")
+            conn = get_conn()
+            cur = conn.cursor()
+            cur.execute("UPDATE tasks SET reminder_1h_sent=1 WHERE id=?", (task_id,))
+            conn.commit()
+            conn.close()
+
+        elif not rem_5 and delta <= timedelta(minutes=5):
+            await bot.send_message(user_id, f"🚨 Задача #{task_id} «{title}» должна быть выполнена через 5 минут! Срок: {due.strftime('%d.%m.%Y %H:%M')}")
+            conn = get_conn()
+            cur = conn.cursor()
+            cur.execute("UPDATE tasks SET reminder_5min_sent=1 WHERE id=?", (task_id,))
+            conn.commit()
+            conn.close()
 
 # ==================== ЗАПУСК ====================
-
 async def main():
     init_db()
 
     scheduler.add_job(check_reminders, IntervalTrigger(seconds=60))
     scheduler.start()
 
+    logger.info("Бот запущен")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
