@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-Бот для управления задачами инженеров в мессенджере MAX.
-Руководитель может добавлять/удалять инженеров, назначать задачи, делать рассылку.
+Бот для управления задачами инженеров в MAX.
 """
 
 import os
@@ -26,40 +25,40 @@ ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
 TIMEZONE = pytz.timezone("Europe/Moscow")
 
 if not BOT_TOKEN:
-    raise ValueError("Не задан MAX_BOT_TOKEN в .env")
+    raise ValueError("Не задан MAX_BOT_TOKEN")
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 scheduler = AsyncIOScheduler(timezone=TIMEZONE)
 
-# ==================== БАЗА ДАННЫХ ====================
-def init_db():
+# ==================== БД ====================
+def get_conn():
     conn = sqlite3.connect("engineers.db")
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
+
+def init_db():
+    conn = get_conn()
     cur = conn.cursor()
+
     cur.execute("""
         CREATE TABLE IF NOT EXISTS engineers (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER UNIQUE NOT NULL,
+            user_id INTEGER PRIMARY KEY,
             username TEXT,
-            full_name TEXT,
-            registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            full_name TEXT
         )
     """)
+
     cur.execute("""
         CREATE TABLE IF NOT EXISTS tasks (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            title TEXT NOT NULL,
+            title TEXT,
             description TEXT,
-            assigned_to INTEGER NOT NULL,
-            due_date TIMESTAMP NOT NULL,
-            created_by INTEGER NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            assigned_to INTEGER,
+            due_date TEXT,
             status TEXT DEFAULT 'active',
             reminder_24h_sent INTEGER DEFAULT 0,
             reminder_1h_sent INTEGER DEFAULT 0,
@@ -67,573 +66,228 @@ def init_db():
             FOREIGN KEY(assigned_to) REFERENCES engineers(user_id) ON DELETE CASCADE
         )
     """)
+
     conn.commit()
     conn.close()
-    logger.info("База данных инициализирована")
 
-def register_engineer(user_id: int, username: str = None, full_name: str = None):
-    conn = sqlite3.connect("engineers.db")
+def register_engineer(user_id, username, full_name):
+    conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
-        INSERT INTO engineers (user_id, username, full_name)
+        INSERT INTO engineers(user_id, username, full_name)
         VALUES (?, ?, ?)
         ON CONFLICT(user_id) DO UPDATE SET
-            username = excluded.username,
-            full_name = excluded.full_name
+            username=excluded.username,
+            full_name=excluded.full_name
     """, (user_id, username, full_name))
     conn.commit()
     conn.close()
 
-def get_engineer_by_user_id(user_id: int) -> Optional[Tuple]:
-    conn = sqlite3.connect("engineers.db")
+def get_all_engineers():
+    conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT user_id, username, full_name FROM engineers WHERE user_id = ?", (user_id,))
-    row = cur.fetchone()
-    conn.close()
-    return row
-
-def get_engineer_by_username(username: str) -> Optional[Tuple]:
-    conn = sqlite3.connect("engineers.db")
-    cur = conn.cursor()
-    cur.execute("SELECT user_id, username, full_name FROM engineers WHERE username LIKE ?", (f"%{username}%",))
-    row = cur.fetchone()
-    conn.close()
-    return row
-
-def get_all_engineers() -> List[Tuple]:
-    conn = sqlite3.connect("engineers.db")
-    cur = conn.cursor()
-    cur.execute("SELECT user_id, username, full_name FROM engineers ORDER BY full_name")
+    cur.execute("SELECT user_id, username, full_name FROM engineers")
     rows = cur.fetchall()
     conn.close()
     return rows
 
-def remove_engineer_by_user_id(user_id: int) -> bool:
-    conn = sqlite3.connect("engineers.db")
-    cur = conn.cursor()
-    cur.execute("DELETE FROM engineers WHERE user_id = ?", (user_id,))
-    removed = cur.rowcount > 0
-    conn.commit()
-    conn.close()
-    return removed
-
-def add_task(title: str, description: str, assigned_to: int, due_date: datetime, created_by: int) -> int:
-    conn = sqlite3.connect("engineers.db")
+def add_task(title, desc, user_id, due_date):
+    conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
-        INSERT INTO tasks (title, description, assigned_to, due_date, created_by)
-        VALUES (?, ?, ?, ?, ?)
-    """, (title, description, assigned_to, due_date.isoformat(), created_by))
+        INSERT INTO tasks(title, description, assigned_to, due_date)
+        VALUES (?, ?, ?, ?)
+    """, (title, desc, user_id, due_date.isoformat()))
     task_id = cur.lastrowid
     conn.commit()
     conn.close()
     return task_id
 
-def get_user_tasks(user_id: int, status: str = "active") -> List[Tuple]:
-    conn = sqlite3.connect("engineers.db")
+def get_user_tasks(user_id):
+    conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
-        SELECT id, title, description, due_date, status
-        FROM tasks
-        WHERE assigned_to = ? AND status = ?
-        ORDER BY due_date ASC
-    """, (user_id, status))
+        SELECT id, title, description, due_date
+        FROM tasks WHERE assigned_to=? AND status='active'
+        ORDER BY due_date
+    """, (user_id,))
     rows = cur.fetchall()
     conn.close()
     return rows
 
-def get_all_active_tasks() -> List[Tuple]:
-    conn = sqlite3.connect("engineers.db")
+def complete_task(task_id, user_id):
+    conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
-        SELECT t.id, t.title, t.description, t.due_date, t.assigned_to,
-               e.username, e.full_name, t.reminder_24h_sent, t.reminder_1h_sent, t.reminder_5min_sent
+        UPDATE tasks SET status='done'
+        WHERE id=? AND assigned_to=?
+    """, (task_id, user_id))
+    ok = cur.rowcount > 0
+    conn.commit()
+    conn.close()
+    return ok
+
+def get_all_tasks_grouped():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT t.id, t.title, t.description, t.due_date, t.status,
+               e.full_name, e.username, t.assigned_to
         FROM tasks t
         JOIN engineers e ON t.assigned_to = e.user_id
-        WHERE t.status = 'active'
+        WHERE t.status IN ('active','expired')
+        ORDER BY e.full_name, t.due_date
     """)
     rows = cur.fetchall()
     conn.close()
     return rows
 
-def complete_task(task_id: int, user_id: int) -> bool:
-    conn = sqlite3.connect("engineers.db")
-    cur = conn.cursor()
-    cur.execute("""
-        UPDATE tasks SET status = 'done'
-        WHERE id = ? AND assigned_to = ? AND status = 'active'
-    """, (task_id, user_id))
-    updated = cur.rowcount > 0
-    conn.commit()
-    conn.close()
-    return updated
-
-def update_reminder_flag(task_id: int, field: str):
-    conn = sqlite3.connect("engineers.db")
-    cur = conn.cursor()
-    cur.execute(f"UPDATE tasks SET {field} = 1 WHERE id = ?", (task_id,))
-    conn.commit()
-    conn.close()
-
-# ==================== ОБРАБОТЧИКИ ====================
-
-@dp.bot_started()
-async def on_bot_started(event: BotStarted):
-    user = event.user
-    user_id = user.user_id
-    username = getattr(user, 'username', None)
-    full_name = getattr(user, 'first_name', '') + ' ' + getattr(user, 'last_name', '')
-    full_name = full_name.strip()
-    register_engineer(user_id, username, full_name)
-
-    if user_id == ADMIN_ID:
-        text = (
-            "👋 Здравствуйте, руководитель!\n\n"
-            "Доступные команды:\n"
-            "/add_engineer_by_id <ID> [Имя] — добавить инженера по ID\n"
-            "/remove_engineer @username — удалить инженера\n"
-            "/remove_engineer_by_id <ID> — удалить инженера по ID\n"
-            "/list_engineers — список инженеров\n"
-            "/assign @username Заголовок | Описание | ДД.ММ.ГГГГ ЧЧ:ММ\n"
-            "/assign_by_id <ID> Заголовок | Описание | ДД.ММ.ГГГГ ЧЧ:ММ\n"
-            "/broadcast текст — сообщение всем инженерам\n"
-            "/my_tasks — мои задачи\n"
-            "/done N — отметить задачу выполненной\n"
-            "/help — справка"
-        )
-    else:
-        text = (
-            "👋 Привет! Вы зарегистрированы в системе задач.\n\n"
-            "Доступные команды:\n"
-            "/my_tasks — мои задачи\n"
-            "/done N — отметить задачу выполненной\n"
-            "/help — справка"
-        )
-    await bot.send_message(chat_id=event.chat_id, text=text)
+# ==================== КОМАНДЫ ====================
 
 @dp.message_created(Command('start'))
-async def cmd_start(event: MessageCreated):
-    user_id = event.message.sender.user_id
-    username = getattr(event.message.sender, 'username', None)
-    full_name = getattr(event.message.sender, 'first_name', '') + ' ' + getattr(event.message.sender, 'last_name', '')
-    full_name = full_name.strip()
-    register_engineer(user_id, username, full_name)
+async def start(event: MessageCreated):
+    u = event.message.sender
+    register_engineer(u.user_id, getattr(u, 'username', None),
+                      f"{getattr(u,'first_name','')} {getattr(u,'last_name','')}".strip())
 
-    if user_id == ADMIN_ID:
-        text = (
-            "👋 Здравствуйте, руководитель!\n\n"
-            "Доступные команды:\n"
-            "/add_engineer_by_id <ID> [Имя] — добавить инженера по ID\n"
-            "/remove_engineer @username — удалить инженера\n"
-            "/remove_engineer_by_id <ID> — удалить инженера по ID\n"
-            "/list_engineers — список инженеров\n"
-            "/assign @username Заголовок | Описание | ДД.ММ.ГГГГ ЧЧ:ММ\n"
-            "/assign_by_id <ID> Заголовок | Описание | ДД.ММ.ГГГГ ЧЧ:ММ\n"
-            "/broadcast текст — сообщение всем инженерам\n"
-            "/my_tasks — мои задачи\n"
-            "/done N — отметить задачу выполненной\n"
-            "/help — справка"
-        )
-    else:
-        text = (
-            "👋 Привет! Вы зарегистрированы в системе задач.\n\n"
-            "Доступные команды:\n"
-            "/my_tasks — мои задачи\n"
-            "/done N — отметить задачу выполненной\n"
-            "/help — справка"
-        )
-    await event.message.answer(text)
+    await event.message.answer("Бот задач запущен. /help")
 
 @dp.message_created(Command('help'))
-async def cmd_help(event: MessageCreated):
-    user_id = event.message.sender.user_id
-    if user_id == ADMIN_ID:
-        text = (
-            "📌 Команды руководителя:\n"
-            "/add_engineer_by_id <ID> [Имя] — добавить инженера по ID\n"
-            "/remove_engineer @username — удалить инженера\n"
-            "/remove_engineer_by_id <ID> — удалить инженера по ID\n"
-            "/list_engineers — список инженеров\n"
-            "/assign @username Заголовок | Описание | ДД.ММ.ГГГГ ЧЧ:ММ\n"
-            "/assign_by_id <ID> Заголовок | Описание | ДД.ММ.ГГГГ ЧЧ:ММ\n"
-            "/broadcast сообщение — массовая рассылка\n"
-            "/my_tasks — мои задачи\n"
-            "/done N — отметить задачу выполненной\n\n"
-            "📅 Формат даты: ДД.ММ.ГГГГ ЧЧ:ММ (например, 31.12.2025 18:00)"
+async def help_cmd(event: MessageCreated):
+    if event.message.sender.user_id == ADMIN_ID:
+        await event.message.answer(
+            "/assign ID Заголовок | Описание | ДД.ММ.ГГГГ ЧЧ:ММ\n"
+            "/all_tasks — все задачи\n"
+            "/broadcast текст\n"
+            "/my_tasks\n"
+            "/done N"
         )
     else:
-        text = (
-            "📌 Команды инженера:\n"
-            "/my_tasks — список моих задач\n"
-            "/done N — отметить задачу выполненной"
-        )
-    await event.message.answer(text)
-
-@dp.message_created(Command('add_engineer_by_id'))
-async def cmd_add_engineer_by_id(event: MessageCreated):
-    if event.message.sender.user_id != ADMIN_ID:
-        await event.message.answer("⛔ Только руководитель может добавлять инженеров.")
-        return
-
-    text = event.message.body.text.replace("/add_engineer_by_id", "", 1).strip()
-    if not text:
-        await event.message.answer("❌ Использование: /add_engineer_by_id <ID> [Имя Фамилия]")
-        return
-
-    parts = text.split(maxsplit=1)
-    try:
-        user_id = int(parts[0])
-    except ValueError:
-        await event.message.answer("❌ ID должен быть числом.")
-        return
-
-    full_name = parts[1] if len(parts) > 1 else str(user_id)
-
-    # Проверяем, существует ли пользователь (отправляем тестовое сообщение)
-    try:
-        await bot.send_message(chat_id=user_id, text="🔍 Проверка связи...")
-    except Exception as e:
-        await event.message.answer(f"❌ Не удалось отправить сообщение пользователю с ID {user_id}. Убедитесь, что он существует и не заблокировал бота.")
-        return
-
-    register_engineer(user_id, username=None, full_name=full_name)
-
-    try:
-        await bot.send_message(
-            chat_id=user_id,
-            text=f"👋 Вас добавил руководитель в бот задач. Теперь вы будете получать уведомления.\n"
-                 f"Используйте /my_tasks для просмотра, /done N для завершения задачи."
-        )
-    except Exception as e:
-        logger.warning(f"Не удалось отправить приветствие {user_id}: {e}")
-
-    await event.message.answer(f"✅ Инженер с ID {user_id} ({full_name}) добавлен. Уведомление отправлено.")
-
-@dp.message_created(Command('remove_engineer'))
-async def cmd_remove_engineer(event: MessageCreated):
-    if event.message.sender.user_id != ADMIN_ID:
-        await event.message.answer("⛔ Только руководитель может удалять инженеров.")
-        return
-
-    text = event.message.body.text.replace("/remove_engineer", "", 1).strip()
-    if not text:
-        await event.message.answer("❌ Использование: /remove_engineer @username")
-        return
-
-    username = text.lstrip('@')
-    engineer = get_engineer_by_username(username)
-    if not engineer:
-        await event.message.answer(f"❌ Инженер с username '{username}' не найден.")
-        return
-
-    user_id, username, full_name = engineer
-    if remove_engineer_by_user_id(user_id):
-        await event.message.answer(f"✅ Инженер {full_name} (@{username}) удалён. Все его задачи также удалены.")
-    else:
-        await event.message.answer("❌ Не удалось удалить инженера.")
-
-@dp.message_created(Command('remove_engineer_by_id'))
-async def cmd_remove_engineer_by_id(event: MessageCreated):
-    if event.message.sender.user_id != ADMIN_ID:
-        await event.message.answer("⛔ Только руководитель может удалять инженеров.")
-        return
-
-    text = event.message.body.text.replace("/remove_engineer_by_id", "", 1).strip()
-    if not text:
-        await event.message.answer("❌ Использование: /remove_engineer_by_id <ID>")
-        return
-
-    try:
-        user_id = int(text.strip())
-    except ValueError:
-        await event.message.answer("❌ ID должен быть числом.")
-        return
-
-    engineer = get_engineer_by_user_id(user_id)
-    if not engineer:
-        await event.message.answer(f"❌ Инженер с ID {user_id} не найден.")
-        return
-
-    _, username, full_name = engineer
-    if remove_engineer_by_user_id(user_id):
-        await event.message.answer(f"✅ Инженер {full_name} (ID: {user_id}) удалён. Все его задачи также удалены.")
-    else:
-        await event.message.answer("❌ Не удалось удалить инженера.")
-
-@dp.message_created(Command('list_engineers'))
-async def cmd_list_engineers(event: MessageCreated):
-    if event.message.sender.user_id != ADMIN_ID:
-        await event.message.answer("⛔ Только руководитель.")
-        return
-
-    engineers = get_all_engineers()
-    if not engineers:
-        await event.message.answer("Нет зарегистрированных инженеров.")
-        return
-
-    answer = "📋 Список инженеров:\n\n"
-    for user_id, username, full_name in engineers:
-        answer += f"• {full_name} (@{username or 'нет username'}) — ID: {user_id}\n"
-    await event.message.answer(answer)
-
-@dp.message_created(Command('my_tasks'))
-async def cmd_my_tasks(event: MessageCreated):
-    user_id = event.message.sender.user_id
-    tasks = get_user_tasks(user_id)
-
-    if not tasks:
-        await event.message.answer("✅ У вас нет активных задач.")
-        return
-
-    answer = "📋 Ваши активные задачи:\n\n"
-    for task_id, title, desc, due_date_str, status in tasks:
-        due_date = datetime.fromisoformat(due_date_str)
-        due_fmt = due_date.strftime("%d.%m.%Y %H:%M")
-        answer += f"{task_id}. {title}\n   📝 {desc}\n   ⏰ Срок: {due_fmt}\n\n"
-    await event.message.answer(answer)
-
-@dp.message_created(Command('done'))
-async def cmd_done(event: MessageCreated):
-    user_id = event.message.sender.user_id
-    text = event.message.body.text
-    parts = text.split(maxsplit=1)
-    if len(parts) < 2 or not parts[1].strip().isdigit():
-        await event.message.answer("❌ Использование: /done номер_задачи")
-        return
-
-    task_id = int(parts[1].strip())
-    if complete_task(task_id, user_id):
-        await event.message.answer(f"✅ Задача #{task_id} отмечена выполненной!")
-    else:
-        await event.message.answer(f"❌ Задача #{task_id} не найдена или уже выполнена.")
-
-@dp.message_created(Command('broadcast'))
-async def cmd_broadcast(event: MessageCreated):
-    if event.message.sender.user_id != ADMIN_ID:
-        await event.message.answer("⛔ У вас нет прав для этой команды.")
-        return
-
-    text = event.message.body.text.replace("/broadcast", "", 1).strip()
-    if not text:
-        await event.message.answer("❌ Использование: /broadcast сообщение для всех")
-        return
-
-    engineers = get_all_engineers()
-    if not engineers:
-        await event.message.answer("Нет зарегистрированных инженеров.")
-        return
-
-    success = 0
-    for user_id, username, full_name in engineers:
-        try:
-            await bot.send_message(
-                chat_id=user_id,
-                text=f"📢 Массовое уведомление:\n\n{text}"
-            )
-            success += 1
-            await asyncio.sleep(0.05)
-        except Exception as e:
-            logger.error(f"Не удалось отправить сообщение {user_id}: {e}")
-
-    await event.message.answer(f"✅ Рассылка завершена. Отправлено {success} из {len(engineers)} инженерам.")
+        await event.message.answer("/my_tasks\n/done N")
 
 @dp.message_created(Command('assign'))
-async def cmd_assign(event: MessageCreated):
+async def assign(event: MessageCreated):
     if event.message.sender.user_id != ADMIN_ID:
-        await event.message.answer("⛔ Только руководитель может создавать задачи.")
         return
 
-    text = event.message.body.text.replace("/assign", "", 1).strip()
-    if not text:
-        await event.message.answer("❌ Использование: /assign @username Заголовок | Описание | ДД.ММ.ГГГГ ЧЧ:ММ")
-        return
-
+    text = event.message.body.text.replace("/assign", "").strip()
     parts = text.split(maxsplit=1)
-    if len(parts) < 2:
-        await event.message.answer("❌ Укажите username и параметры задачи.")
+
+    user_id = int(parts[0])
+    title, desc, due = [x.strip() for x in parts[1].split("|")]
+
+    due_date = TIMEZONE.localize(datetime.strptime(due, "%d.%m.%Y %H:%M"))
+
+    task_id = add_task(title, desc, user_id, due_date)
+
+    await bot.send_message(user_id, f"Новая задача #{task_id}: {title}")
+
+    await event.message.answer(f"Создана задача #{task_id}")
+
+@dp.message_created(Command('my_tasks'))
+async def my_tasks(event: MessageCreated):
+    tasks = get_user_tasks(event.message.sender.user_id)
+
+    if not tasks:
+        await event.message.answer("Нет задач")
         return
 
-    username_raw = parts[0].lstrip('@')
-    rest = parts[1]
+    text = ""
+    for t in tasks:
+        due = datetime.fromisoformat(t[3])
+        if due.tzinfo is None:
+            due = TIMEZONE.localize(due)
 
-    task_parts = [p.strip() for p in rest.split("|")]
-    if len(task_parts) < 3:
-        await event.message.answer("❌ Формат: /assign @username Заголовок | Описание | ДД.ММ.ГГГГ ЧЧ:ММ")
-        return
+        text += f"{t[0]}. {t[1]} до {due.strftime('%d.%m %H:%M')}\n"
 
-    title, description, due_str = task_parts[0], task_parts[1], task_parts[2]
+    await event.message.answer(text)
 
-    engineer = get_engineer_by_username(username_raw)
-    if not engineer:
-        await event.message.answer(f"❌ Инженер с username '{username_raw}' не найден. Сначала добавьте его через /add_engineer_by_id или попросите написать /start.")
-        return
+@dp.message_created(Command('done'))
+async def done(event: MessageCreated):
+    task_id = int(event.message.body.text.split()[1])
+    if complete_task(task_id, event.message.sender.user_id):
+        await event.message.answer("Готово")
+    else:
+        await event.message.answer("Ошибка")
 
-    assigned_to, username, full_name = engineer
-
-    try:
-        due_date = datetime.strptime(due_str, "%d.%m.%Y %H:%M")
-        due_date = TIMEZONE.localize(due_date)
-    except ValueError:
-        await event.message.answer("❌ Неверный формат даты. Используйте: ДД.ММ.ГГГГ ЧЧ:ММ")
-        return
-
-    if due_date < datetime.now(TIMEZONE):
-        await event.message.answer("⚠️ Срок выполнения уже прошёл.")
-        return
-
-    task_id = add_task(title, description, assigned_to, due_date, event.message.sender.user_id)
-    due_fmt = due_date.strftime("%d.%m.%Y %H:%M")
-
-    await event.message.answer(
-        f"✅ Задача #{task_id} создана!\n"
-        f"👷 Инженер: @{username}\n"
-        f"📌 {title}\n"
-        f"📝 {description or '—'}\n"
-        f"⏰ Срок: {due_fmt}"
-    )
-
-    try:
-        await bot.send_message(
-            chat_id=assigned_to,
-            text=f"🔔 Новая задача #{task_id}!\n\n"
-                 f"{title}\n{description}\n\n"
-                 f"⏰ Срок: {due_fmt}\n\n"
-                 f"/my_tasks — список ваших задач."
-        )
-    except Exception as e:
-        logger.error(f"Ошибка уведомления: {e}")
-
-@dp.message_created(Command('assign_by_id'))
-async def cmd_assign_by_id(event: MessageCreated):
+@dp.message_created(Command('all_tasks'))
+async def all_tasks(event: MessageCreated):
     if event.message.sender.user_id != ADMIN_ID:
-        await event.message.answer("⛔ Только руководитель может создавать задачи.")
         return
 
-    text = event.message.body.text.replace("/assign_by_id", "", 1).strip()
-    if not text:
-        await event.message.answer("❌ Использование: /assign_by_id <ID> Заголовок | Описание | ДД.ММ.ГГГГ ЧЧ:ММ")
-        return
-
-    parts = text.split(maxsplit=1)
-    if len(parts) < 2:
-        await event.message.answer("❌ Укажите ID инженера и параметры задачи.")
-        return
-
-    try:
-        assigned_to = int(parts[0])
-    except ValueError:
-        await event.message.answer("❌ ID должен быть числом.")
-        return
-
-    rest = parts[1]
-    task_parts = [p.strip() for p in rest.split("|")]
-    if len(task_parts) < 3:
-        await event.message.answer("❌ Формат: /assign_by_id ID Заголовок | Описание | ДД.ММ.ГГГГ ЧЧ:ММ")
-        return
-
-    title, description, due_str = task_parts[0], task_parts[1], task_parts[2]
-
-    engineer = get_engineer_by_user_id(assigned_to)
-    if not engineer:
-        await event.message.answer(f"❌ Инженер с ID {assigned_to} не найден. Сначала добавьте его через /add_engineer_by_id или попросите написать /start.")
-        return
-
-    username, full_name = engineer[1], engineer[2]
-
-    try:
-        due_date = datetime.strptime(due_str, "%d.%m.%Y %H:%M")
-        due_date = TIMEZONE.localize(due_date)
-    except ValueError:
-        await event.message.answer("❌ Неверный формат даты. Используйте: ДД.ММ.ГГГГ ЧЧ:ММ")
-        return
-
-    if due_date < datetime.now(TIMEZONE):
-        await event.message.answer("⚠️ Срок выполнения уже прошёл.")
-        return
-
-    task_id = add_task(title, description, assigned_to, due_date, event.message.sender.user_id)
-    due_fmt = due_date.strftime("%d.%m.%Y %H:%M")
-
-    await event.message.answer(
-        f"✅ Задача #{task_id} создана!\n"
-        f"👷 Инженер: {full_name} (ID: {assigned_to})\n"
-        f"📌 {title}\n"
-        f"📝 {description or '—'}\n"
-        f"⏰ Срок: {due_fmt}"
-    )
-
-    try:
-        await bot.send_message(
-            chat_id=assigned_to,
-            text=f"🔔 Новая задача #{task_id}!\n\n"
-                 f"{title}\n{description}\n\n"
-                 f"⏰ Срок: {due_fmt}\n\n"
-                 f"/my_tasks — список ваших задач."
-        )
-    except Exception as e:
-        logger.error(f"Ошибка уведомления: {e}")
-
-# ==================== ФОНОВЫЕ НАПОМИНАНИЯ ====================
-
-async def check_reminders():
-    tasks = get_all_active_tasks()
+    tasks = get_all_tasks_grouped()
     now = datetime.now(TIMEZONE)
 
-    for task in tasks:
-        (task_id, title, desc, due_date_str, assigned_to,
-         username, full_name, rem_24h, rem_1h, rem_5min) = task
-        due_date = datetime.fromisoformat(due_date_str)
+    text = "Все задачи:\n\n"
+    current = None
 
-        if due_date < now:
-            conn = sqlite3.connect("engineers.db")
-            cur = conn.cursor()
-            cur.execute("UPDATE tasks SET status = 'expired' WHERE id = ?", (task_id,))
-            conn.commit()
-            conn.close()
-            continue
+    for t in tasks:
+        task_id, title, desc, due_str, status, full_name, username, uid = t
 
-        delta = due_date - now
+        due = datetime.fromisoformat(due_str)
+        if due.tzinfo is None:
+            due = TIMEZONE.localize(due)
 
-        if not rem_24h and delta <= timedelta(hours=24):
-            await bot.send_message(
-                chat_id=assigned_to,
-                text=f"⏰ Напоминание о задаче #{task_id}\n\n"
-                     f"{title}\n{desc or ''}\n\n"
-                     f"⏳ Осталось менее 24 часов. Срок: {due_date.strftime('%d.%m.%Y %H:%M')}"
-            )
-            update_reminder_flag(task_id, "reminder_24h_sent")
+        if current != uid:
+            current = uid
+            text += f"\n👷 {full_name} (@{username or '—'})\n"
 
-        elif not rem_1h and delta <= timedelta(hours=1):
-            await bot.send_message(
-                chat_id=assigned_to,
-                text=f"⚠️ Срочное напоминание!\n\n"
-                     f"Задача #{task_id} «{title}»\n"
-                     f"Срок выполнения через час: {due_date.strftime('%d.%m.%Y %H:%M')}"
-            )
-            update_reminder_flag(task_id, "reminder_1h_sent")
+        status_icon = "❌" if due < now else "🟢"
 
-        elif not rem_5min and delta <= timedelta(minutes=5):
-            await bot.send_message(
-                chat_id=assigned_to,
-                text=f"🚨 Задача #{task_id} должна быть выполнена через 5 минут!\n\n"
-                     f"«{title}» — {desc or ''}\n"
-                     f"Срок: {due_date.strftime('%d.%m.%Y %H:%M')}"
-            )
-            update_reminder_flag(task_id, "reminder_5min_sent")
+        text += f"{task_id}. {title} ({due.strftime('%d.%m %H:%M')}) {status_icon}\n"
+
+    await event.message.answer(text)
+
+@dp.message_created(Command('broadcast'))
+async def broadcast(event: MessageCreated):
+    if event.message.sender.user_id != ADMIN_ID:
+        return
+
+    msg = event.message.body.text.replace("/broadcast", "").strip()
+    users = get_all_engineers()
+
+    for u in users:
+        try:
+            await bot.send_message(u[0], msg)
+            await asyncio.sleep(0.05)
+        except:
+            pass
+
+    await event.message.answer("Рассылка завершена")
+
+# ==================== НАПОМИНАНИЯ ====================
+
+async def check_reminders():
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("SELECT id, title, due_date, assigned_to FROM tasks WHERE status='active'")
+    tasks = cur.fetchall()
+
+    now = datetime.now(TIMEZONE)
+
+    for t in tasks:
+        task_id, title, due_str, user_id = t
+        due = datetime.fromisoformat(due_str)
+
+        if due.tzinfo is None:
+            due = TIMEZONE.localize(due)
+
+        if due < now:
+            cur.execute("UPDATE tasks SET status='expired' WHERE id=?", (task_id,))
+            await bot.send_message(user_id, f"Задача {title} просрочена")
+
+    conn.commit()
+    conn.close()
 
 # ==================== ЗАПУСК ====================
 
 async def main():
     init_db()
-    try:
-        await bot.delete_webhook()
-    except Exception as e:
-        logger.warning(f"Ошибка удаления webhook: {e}")
 
     scheduler.add_job(check_reminders, IntervalTrigger(seconds=60))
     scheduler.start()
 
-    logger.info("Бот запущен и ожидает сообщений...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
