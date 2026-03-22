@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Бот для управления задачами инженеров в MAX.
-Добавлены функции и смайлики для улучшения интерфейса.
+Использует базу данных в /app/data/engineers.db.
 """
 
 import os
@@ -36,9 +36,12 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 scheduler = AsyncIOScheduler(timezone=TIMEZONE)
 
-# ==================== БД ====================
+# ==================== БД (абсолютный путь) ====================
+DB_PATH = "/app/data/engineers.db"
+
 def get_conn():
-    DB_PATH = "/app/data/engineers.db"
+    """Возвращает соединение с БД, создавая папку при необходимости."""
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
@@ -72,6 +75,7 @@ def init_db():
 
     conn.commit()
     conn.close()
+    logger.info("База данных инициализирована в %s", DB_PATH)
 
 def register_engineer(user_id, username, full_name):
     conn = get_conn()
@@ -329,26 +333,21 @@ async def all_tasks(event: MessageCreated):
 
     await event.message.answer(text)
 
-@dp.message_created(Command('broadcast'))
-async def broadcast(event: MessageCreated):
+@dp.message_created(Command('list_engineers'))
+async def list_engineers(event: MessageCreated):
     if event.message.sender.user_id != ADMIN_ID:
+        await event.message.answer("⛔ Только руководитель.")
         return
 
-    msg = event.message.body.text.replace("/broadcast", "").strip()
-    if not msg:
-        await event.message.answer("❌ Использование: /broadcast текст")
+    engineers = get_all_engineers()
+    if not engineers:
+        await event.message.answer("Нет зарегистрированных инженеров.")
         return
 
-    users = get_all_engineers()
-    success = 0
-    for u in users:
-        try:
-            await bot.send_message(u[0], f"📢 Массовое уведомление:\n\n{msg}")
-            success += 1
-            await asyncio.sleep(0.05)
-        except Exception as e:
-            logger.warning(f"Не удалось отправить {u[0]}: {e}")
-    await event.message.answer(f"✅ Рассылка завершена. Отправлено {success} из {len(users)} инженерам.")
+    answer = "👥 *Список инженеров:*\n\n"
+    for user_id, username, full_name in engineers:
+        answer += f"• {full_name} (@{username or 'нет username'}) — ID: {user_id}\n"
+    await event.message.answer(answer)
 
 @dp.message_created(Command('add_engineer'))
 async def add_engineer_cmd(event: MessageCreated):
@@ -385,6 +384,27 @@ async def remove_user(event: MessageCreated):
         await event.message.answer(f"❌ Инженер с ID {user_id} удалён. Все его задачи также удалены.")
     else:
         await event.message.answer(f"❌ Инженер с ID {user_id} не найден.")
+
+@dp.message_created(Command('broadcast'))
+async def broadcast(event: MessageCreated):
+    if event.message.sender.user_id != ADMIN_ID:
+        return
+
+    msg = event.message.body.text.replace("/broadcast", "").strip()
+    if not msg:
+        await event.message.answer("❌ Использование: /broadcast текст")
+        return
+
+    users = get_all_engineers()
+    success = 0
+    for u in users:
+        try:
+            await bot.send_message(u[0], f"📢 Массовое уведомление:\n\n{msg}")
+            success += 1
+            await asyncio.sleep(0.05)
+        except Exception as e:
+            logger.warning(f"Не удалось отправить {u[0]}: {e}")
+    await event.message.answer(f"✅ Рассылка завершена. Отправлено {success} из {len(users)} инженерам.")
 
 @dp.message_created(Command('remind_all_now'))
 async def remind_all_now(event: MessageCreated):
@@ -498,7 +518,7 @@ async def check_user(event: MessageCreated):
     else:
         await event.message.answer(f"❌ Инженер с ID {user_id} не найден.")
 
-# ==================== ЕЖЕДНЕВНОЕ НАПОМИНАНИЕ ====================
+# ==================== ФОНОВЫЕ ЗАДАЧИ ====================
 async def daily_reminder():
     tasks = get_all_active_tasks_for_reminder()
     if not tasks:
@@ -532,17 +552,6 @@ async def daily_reminder():
             logger.warning(f"Не удалось отправить ежедневное напоминание {user_id}: {e}")
         await asyncio.sleep(0.1)
 
-# ==================== ЗАПУСК ====================
-async def main():
-    init_db()
-
-    scheduler.add_job(daily_reminder, CronTrigger(hour=9, minute=0, timezone=TIMEZONE))
-    scheduler.add_job(check_deadlines, IntervalTrigger(seconds=60))
-    scheduler.start()
-
-    logger.info("Бот запущен и ожидает сообщений...")
-    await dp.start_polling(bot)
-
 async def check_deadlines():
     tasks = get_all_active_tasks_for_reminder()
     now = datetime.now(TIMEZONE)
@@ -563,6 +572,17 @@ async def check_deadlines():
         elif delta.total_seconds() <= 0:
             # Пометим как expired (можно добавить обновление статуса, но для простоты опустим)
             pass
+
+# ==================== ЗАПУСК ====================
+async def main():
+    init_db()
+
+    scheduler.add_job(daily_reminder, CronTrigger(hour=9, minute=0, timezone=TIMEZONE))
+    scheduler.add_job(check_deadlines, IntervalTrigger(seconds=60))
+    scheduler.start()
+
+    logger.info("Бот запущен и ожидает сообщений...")
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
